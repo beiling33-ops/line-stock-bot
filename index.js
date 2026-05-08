@@ -9,7 +9,7 @@ const config = {
 const app = express();
 
 app.get('/', (req, res) => {
-  res.send('LINE BOT OK');
+  res.send('LINE Bot OK');
 });
 
 app.post('/webhook', line.middleware(config), (req, res) => {
@@ -25,7 +25,6 @@ app.post('/webhook', line.middleware(config), (req, res) => {
 const client = new line.Client(config);
 
 function handleEvent(event) {
-
   if (event.type !== 'message') {
     return Promise.resolve(null);
   }
