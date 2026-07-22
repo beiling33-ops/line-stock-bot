@@ -1,152 +1,100 @@
-const BASE_URL = "https://api.fugle.tw/marketdata/v1.0/stock/intraday/quote";
+const express = require("express");
+const router = express.Router();
 
-const API_KEY = process.env.FUGLE_API_KEY;
+const {
+  getQuoteBySymbol,
+  getQuotes,
+  clearCache,
+  getCacheStatus
+} = require("../services/quoteService");
 
-if (!API_KEY) {
-  console.warn("[Fugle] FUGLE_API_KEY 未設定");
-}
+/**
+ * GET /api/quote/:symbol
+ */
+router.get("/quote/:symbol", async (req, res) => {
+  try {
+    const data = await getQuoteBySymbol(req.params.symbol);
 
-const DEFAULT_TIMEOUT = 5000;
-const DEFAULT_RETRY = 3;
+    res.json({
+      success: true,
+      data
+    });
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
 
-async function request(symbol, retry = DEFAULT_RETRY) {
-  let lastError;
+/**
+ * GET /api/quotes?symbols=2327,3037,3706
+ */
+router.get("/quotes", async (req, res) => {
 
-  for (let i = 1; i <= retry; i++) {
-    const controller = new AbortController();
+  try {
 
-    const timer = setTimeout(() => {
-      controller.abort();
-    }, DEFAULT_TIMEOUT);
+    let symbols =
+      req.query.symbols
+        ?.split(",")
+        .map(s => s.trim())
+        .filter(Boolean);
 
-    try {
-      const response = await fetch(
-        `${BASE_URL}/${symbol}`,
-        {
-          method: "GET",
-          headers: {
-            "X-API-KEY": API_KEY
-          },
-          signal: controller.signal
-        }
-      );
-
-      clearTimeout(timer);
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-
-      return await response.json();
-
-    } catch (err) {
-      clearTimeout(timer);
-
-      lastError = err;
-
-      if (i < retry) {
-        await sleep(500);
-      }
+    if (!symbols || symbols.length === 0) {
+      symbols = [
+        "2327",
+        "3037",
+        "3706",
+        "3006",
+        "2313",
+        "6147"
+      ];
     }
+
+    const data = await getQuotes(symbols);
+
+    res.json({
+      success: true,
+      count: data.length,
+      data
+    });
+
+  } catch (err) {
+
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+
   }
 
-  throw lastError;
-}
+});
 
-function normalize(symbol, data) {
+/**
+ * GET /api/cache
+ */
+router.get("/cache", (req, res) => {
 
-  const price =
-    Number(
-      data.lastPrice ??
-      data.closePrice ??
-      data.lastTrade?.price ??
-      0
-    );
+  res.json({
+    success: true,
+    cache: getCacheStatus()
+  });
 
-  const previousClose =
-    Number(
-      data.previousClose ??
-      data.referencePrice ??
-      0
-    );
+});
 
-  const change = price - previousClose;
+/**
+ * DELETE /api/cache
+ */
+router.delete("/cache", (req, res) => {
 
-  return {
+  clearCache();
 
-    symbol,
+  res.json({
+    success: true,
+    message: "Cache cleared"
+  });
 
-    price,
+});
 
-    previousClose,
-
-    change,
-
-    changePercent:
-      previousClose
-        ? Number(
-            (
-              change /
-              previousClose *
-              100
-            ).toFixed(2)
-          )
-        : 0,
-
-    high:
-      Number(
-        data.highPrice ??
-        0
-      ),
-
-    low:
-      Number(
-        data.lowPrice ??
-        0
-      ),
-
-    open:
-      Number(
-        data.openPrice ??
-        0
-      ),
-
-    volume:
-      Number(
-        data.total?.tradeVolume ??
-        data.tradeVolume ??
-        0
-      ),
-
-    lastSize:
-      Number(
-        data.lastTrade?.size ??
-        0
-      ),
-
-    timestamp:
-      data.lastTrade?.time ??
-      new Date().toISOString()
-  };
-}
-
-async function getQuote(symbol) {
-
-  if (!/^\d{4}$/.test(symbol)) {
-    throw new Error("股票代號格式錯誤");
-  }
-
-  const raw = await request(symbol);
-
-  return normalize(symbol, raw);
-}
-
-module.exports = {
-
-  getQuote
-
-};
+module.exports = router;
