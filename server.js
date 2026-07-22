@@ -1,156 +1,152 @@
-const express = require("express");
-const path = require("path");
+const BASE_URL = "https://api.fugle.tw/marketdata/v1.0/stock/intraday/quote";
 
-const app = express();
-const PORT = process.env.PORT || 3000;
-const KEY = process.env.FUGLE_API_KEY;
+const API_KEY = process.env.FUGLE_API_KEY;
 
-app.use(express.json());
-app.use(express.static(path.join(__dirname, "public")));
-
-// 查詢 Fugle 股票即時報價
-async function quote(symbol) {
-  if (!KEY) {
-    throw new Error("尚未設定 FUGLE_API_KEY");
-  }
-
-  const url =
-    `https://api.fugle.tw/marketdata/v1.0/stock/intraday/quote/${symbol}`;
-
-  const response = await fetch(url, {
-    headers: {
-      "X-API-KEY": KEY
-    }
-  });
-
-  if (!response.ok) {
-    throw new Error(`Fugle API 錯誤：${response.status}`);
-  }
-
-  return await response.json();
+if (!API_KEY) {
+  console.warn("[Fugle] FUGLE_API_KEY 未設定");
 }
 
-// LINE Webhook
-app.post("/webhook", async (req, res) => {
-  // 先立即回覆 LINE 200，避免 webhook timeout
-  res.sendStatus(200);
+const DEFAULT_TIMEOUT = 5000;
+const DEFAULT_RETRY = 3;
 
-  try {
-    console.log("LINE webhook received");
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
-    const events = req.body.events || [];
+async function request(symbol, retry = DEFAULT_RETRY) {
+  let lastError;
 
-    for (const event of events) {
-      if (
-        event.type !== "message" ||
-        event.message?.type !== "text"
-      ) {
-        continue;
-      }
+  for (let i = 1; i <= retry; i++) {
+    const controller = new AbortController();
 
-      const text = event.message.text.trim();
-      const replyToken = event.replyToken;
+    const timer = setTimeout(() => {
+      controller.abort();
+    }, DEFAULT_TIMEOUT);
 
-      // 只接受 4 位數股票代號
-      if (!/^\d{4}$/.test(text)) {
-        await replyLine(
-          replyToken,
-          "請輸入 4 位數台股代號，例如：2327"
-        );
-        continue;
-      }
-
-      try {
-        const data = await quote(text);
-
-        const price =
-          data.lastPrice ??
-          data.closePrice ??
-          data.lastTrade?.price ??
-          "無資料";
-
-        const previousClose =
-          data.previousClose ??
-          data.referencePrice ??
-          null;
-
-        let changeText = "";
-
-        if (
-          typeof price === "number" &&
-          typeof previousClose === "number"
-        ) {
-          const change = price - previousClose;
-          const percent = (change / previousClose) * 100;
-
-          changeText =
-            `\n漲跌：${change >= 0 ? "+" : ""}${change.toFixed(2)}` +
-            `（${percent >= 0 ? "+" : ""}${percent.toFixed(2)}%）`;
+    try {
+      const response = await fetch(
+        `${BASE_URL}/${symbol}`,
+        {
+          method: "GET",
+          headers: {
+            "X-API-KEY": API_KEY
+          },
+          signal: controller.signal
         }
+      );
 
-        const message =
-          `📈 股票代號：${text}` +
-          `\n目前價格：${price}` +
-          changeText;
+      clearTimeout(timer);
 
-        await replyLine(replyToken, message);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
 
-      } catch (error) {
-        console.error("股票查詢失敗：", error);
+      return await response.json();
 
-        await replyLine(
-          replyToken,
-          `查詢 ${text} 失敗：${error.message}`
-        );
+    } catch (err) {
+      clearTimeout(timer);
+
+      lastError = err;
+
+      if (i < retry) {
+        await sleep(500);
       }
     }
-
-  } catch (error) {
-    console.error("Webhook 處理失敗：", error);
-  }
-});
-
-// 回覆 LINE 訊息
-async function replyLine(replyToken, text) {
-  const LINE_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN;
-
-  if (!LINE_TOKEN) {
-    throw new Error("尚未設定 LINE_CHANNEL_ACCESS_TOKEN");
   }
 
-  const response = await fetch(
-    "https://api.line.me/v2/bot/message/reply",
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${LINE_TOKEN}`
-      },
-      body: JSON.stringify({
-        replyToken: replyToken,
-        messages: [
-          {
-            type: "text",
-            text: text
-          }
-        ]
-      })
-    }
-  );
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(
-      `LINE 回覆失敗 ${response.status}: ${errorText}`
-    );
-  }
+  throw lastError;
 }
 
-// 首頁測試
-app.get("/", (req, res) => {
-  res.send("LINE Stock Bot is running");
-});
+function normalize(symbol, data) {
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Server running on port ${PORT}`);
-});
+  const price =
+    Number(
+      data.lastPrice ??
+      data.closePrice ??
+      data.lastTrade?.price ??
+      0
+    );
+
+  const previousClose =
+    Number(
+      data.previousClose ??
+      data.referencePrice ??
+      0
+    );
+
+  const change = price - previousClose;
+
+  return {
+
+    symbol,
+
+    price,
+
+    previousClose,
+
+    change,
+
+    changePercent:
+      previousClose
+        ? Number(
+            (
+              change /
+              previousClose *
+              100
+            ).toFixed(2)
+          )
+        : 0,
+
+    high:
+      Number(
+        data.highPrice ??
+        0
+      ),
+
+    low:
+      Number(
+        data.lowPrice ??
+        0
+      ),
+
+    open:
+      Number(
+        data.openPrice ??
+        0
+      ),
+
+    volume:
+      Number(
+        data.total?.tradeVolume ??
+        data.tradeVolume ??
+        0
+      ),
+
+    lastSize:
+      Number(
+        data.lastTrade?.size ??
+        0
+      ),
+
+    timestamp:
+      data.lastTrade?.time ??
+      new Date().toISOString()
+  };
+}
+
+async function getQuote(symbol) {
+
+  if (!/^\d{4}$/.test(symbol)) {
+    throw new Error("股票代號格式錯誤");
+  }
+
+  const raw = await request(symbol);
+
+  return normalize(symbol, raw);
+}
+
+module.exports = {
+
+  getQuote
+
+};
